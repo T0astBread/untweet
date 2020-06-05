@@ -1,0 +1,113 @@
+#!/bin/bash
+set -euo pipefail
+
+
+TWITTER_DATE_FORMAT="\"%a %b %e %H:%M:%S %z %Y\""
+
+[[ -f .env ]] && source .env
+username=$UNTW_USERNAME
+
+function _twurl {
+	twurl \
+		--consumer-key $UNTW_CONSUMER_KEY \
+		--consumer-secret $UNTW_CONSUMER_SECRET \
+		$@
+}
+
+function load_likes {
+	_twurl "/1.1/favorites/list.json?screen_name=$username&include_entities=false&count=2000"
+}
+
+function load_tweets {
+	_twurl "/1.1/statuses/user_timeline.json?screen_name=$username&trim_user=true&exclude_replies=false&include_rts=true&count=2000"
+}
+
+function mark_old {
+	days_until_old=$1
+	jq "map({ \
+		id_str: .id_str, \
+		user_name: (try .user.screen_name catch null), \
+		text: .text, \
+		created_at: .created_at, \
+		is_old: ( \
+			now
+			- (.created_at | strptime($TWITTER_DATE_FORMAT) | mktime) \
+			> (60*60*24*$days_until_old)), \
+	})"
+}
+
+function pretty_print_part {
+	filter_is_old=$1
+	date_color=$2
+	is_old_color=$3
+	text_color=$4
+	jq -r "map(select(.is_old == $filter_is_old)) | map( \
+		\"$(tput setaf $date_color)\" + (.created_at | strptime($TWITTER_DATE_FORMAT) | strftime(\"%Y/%m/%d\")) + \" \" + \
+		\"$(tput setaf $is_old_color)\" + (if .is_old then \"true  \" else \"false \" end) + \
+		\"$(tput setaf $text_color)\" + \
+		(if .user_name != null then \"@\" + .user_name + \": \" else \"\" end)? + \
+		.text \
+	) | .[]"
+}
+
+function display {
+	days_until_old="$1"
+	marked="$(mark_old $days_until_old)"
+
+	tput init
+	printf "Date       Old?  Text\n"
+	echo "$marked" | pretty_print_part false 2 7 8
+	tput bold
+	echo "$marked" | pretty_print_part true 10 15 7
+	tput sgr0
+}
+
+function destroy {
+	thing_name="$1"
+	destroy_url="$2"
+	days_until_old="$3"
+	mark_old "$days_until_old" \
+	| jq -r "map(select(.is_old)) | map(.id_str) | .[]" \
+	| while read id; do
+		echo
+		echo
+		echo
+		echo "Destroying $thing_name $id..."
+		echo
+		cmd="_twurl -X POST \"$(echo $destroy_url | sed -e 's/__id__/$id/')\""
+		echo $cmd
+		output="$(eval $cmd)"
+		echo "$output"
+
+		if [[ $(echo "$output" | jq ".errors | length") -ne 0 ]]; then
+			echo "Twitter answered with errors"
+			exit 1
+		fi
+	done
+}
+
+function destroy-likes {
+	destroy favorite "/1.1/favorites/destroy.json?id=__id__&include_entities=false" "$1"
+}
+
+function destroy-tweets {
+	destroy Tweet "/1.1/statuses/destroy/__id__.json?trim_user=true" "$1"
+}
+
+case "$1" in
+	"load-tweets")
+		load_tweets
+		;;
+	"load-likes")
+		load_likes
+		;;
+	"display")
+		display "$2"
+		;;
+	"destroy-likes")
+		destroy-likes "$2"
+		;;
+	"destroy-tweets")
+		destroy-tweets "$2"
+		;;
+esac
