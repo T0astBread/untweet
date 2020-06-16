@@ -24,42 +24,59 @@ function load_tweets {
 
 function mark_old {
 	days_until_old=$1
-	jq "map({ \
-		id_str: .id_str, \
-		user_name: (try .user.screen_name catch null), \
-		text: .text, \
-		created_at: .created_at, \
-		is_old: ( \
-			now
-			- (.created_at | strptime($TWITTER_DATE_FORMAT) | mktime) \
-			> (60*60*24*$days_until_old)), \
-	})"
+	jq -s ".[0] as \$keep											\
+	| (.[1] | map(													\
+		.id_str as \$id												\
+		| (now - (													\
+			.created_at | strptime($TWITTER_DATE_FORMAT) | mktime	\
+		) > (60 * 60 * 24 * $days_until_old))						\
+		as \$is_old													\
+		| (\$keep | any(. == \$id))									\
+		as \$is_kept												\
+		| {															\
+			id_str: \$id,											\
+			user_name: (try .user.screen_name catch null),			\
+			text: .text, 											\
+			created_at: .created_at,								\
+			is_old: \$is_old,										\
+			keep: \$is_kept,										\
+			is_marked: (\$is_old and (\$is_kept | not)),			\
+		}															\
+	))" keep.json -
 }
 
-function pretty_print_part {
-	filter_is_old=$1
-	date_color=$2
-	is_old_color=$3
-	text_color=$4
-	jq -r "map(select(.is_old == $filter_is_old)) | map( \
-		\"$(tput setaf $date_color)\" + (.created_at | strptime($TWITTER_DATE_FORMAT) | strftime(\"%Y/%m/%d\")) + \" \" + \
-		\"$(tput setaf $is_old_color)\" + (if .is_old then \"true  \" else \"false \" end) + \
-		\"$(tput setaf $text_color)\" + \
-		(if .user_name != null then \"@\" + .user_name + \": \" else \"\" end)? + \
-		.text \
-	) | .[]"
+function set_color {
+	tput setaf "$1"
 }
 
 function display {
 	days_until_old="$1"
-	marked="$(mark_old $days_until_old)"
-
+	
 	tput init
-	printf "Date       Old?  Text\n"
-	echo "$marked" | pretty_print_part false 2 7 8
-	tput bold
-	echo "$marked" | pretty_print_part true 10 15 7
-	tput sgr0
+	printf "Date       Old?  Keep? ID                  Text\n"
+	
+	marked_date_color=10
+	date_color=2
+	marked_flag_color=15
+	flag_color=7
+	marked_text_color=7
+	text_color=8
+ 
+	mark_old $days_until_old | jq -r "															\
+		def if_marked(\$a; \$b): (if .is_marked then \$a else \$b end);							\
+		map(																					\
+			(if_marked(\"$(tput bold)\"; \"\")) +												\
+			(if_marked(\"$(set_color $marked_date_color)\"; \"$(set_color $date_color)\")) +	\
+			(.created_at | strptime($TWITTER_DATE_FORMAT) | strftime(\"%Y/%m/%d\")) + \" \" +	\
+			(if_marked(\"$(set_color $marked_flag_color)\"; \"$(set_color $flag_color)\")) +	\
+			(if .is_old then \"true  \" else \"false \" end) +									\
+			(if .keep then \"true  \" else \"false \" end) +									\
+			(if_marked(\"$(set_color $marked_text_color)\"; \"$(set_color $text_color)\")) +	\
+			.id_str + \" \" +																	\
+			(if .user_name != null then \"@\" + .user_name + \": \" else \"\" end)? +			\
+			.text +																				\
+			\"$(tput sgr0)\"																	\
+		) | .[]"
 }
 
 function destroy {
@@ -67,16 +84,17 @@ function destroy {
 	destroy_url="$2"
 	days_until_old="$3"
 	mark_old "$days_until_old" \
-	| jq -r "map(select(.is_old)) | map(.id_str) | .[]" \
-	| while read id; do
+	| jq -r "map(select(.is_marked)) | map(.id_str) | .[]" \
+	| while read thing_id; do
 		echo
 		echo
 		echo
-		echo "Destroying $thing_name $id..."
+		echo "Destroying $thing_name $thing_id..."
 		echo
-		cmd="_twurl -X POST \"$(echo $destroy_url | sed -e 's/__id__/$id/')\""
+		cmd="_twurl -X POST \"$(echo $destroy_url | sed s/__id__/$thing_id/)\""
 		echo $cmd
 		output="$(eval $cmd)"
+		#output="{\"errors\": []}"
 		echo "$output"
 
 		if [[ $(echo "$output" | jq ".errors | length") -ne 0 ]]; then
