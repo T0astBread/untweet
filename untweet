@@ -113,6 +113,9 @@ function destroy-tweets {
 }
 
 case "$1" in
+	"authorize")
+		_twurl authorize
+		;;
 	"load-tweets")
 		load_tweets
 		;;
